@@ -1,0 +1,6 @@
+{
+  "name": "Book Explorer",
+  "description": "An elegant, modern AI-powered book companion. Instantly search any book to explore structured summaries, recurring reader sentiments, core insights, and shareable social drafts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
