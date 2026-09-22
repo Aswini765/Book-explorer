@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { PRESET_BOOKS, PresetBook } from "./data";
 import { BookDetails, SearchSuggestion, KeyIdea, DetailedSection } from "./types";
+import { fetchPresetBooks, searchBooksInSupabase, findBookByTitleOrSlug } from "./services/bookService";
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
@@ -33,6 +34,9 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
+  // Available Preset Books (initialized with local, enriched from Supabase)
+  const [presetBooks, setPresetBooks] = useState<PresetBook[]>(PRESET_BOOKS);
+
   // Loaded Book Details
   const [activeBook, setActiveBook] = useState<BookDetails>(PRESET_BOOKS[0].data);
   const [citations, setCitations] = useState<{ title: string; url: string }[]>([]);
@@ -45,6 +49,21 @@ export default function App() {
   const [expandedIdeaIdx, setExpandedIdeaIdx] = useState<number | null>(0); // First expanded by default
   const [searchStatus, setSearchStatus] = useState("Looking up reviews...");
   const suggestionsRef = useRef<HTMLDivElement>(null);
+
+  // Fetch books from Supabase on initial mount
+  useEffect(() => {
+    let isMounted = true;
+    fetchPresetBooks().then((books) => {
+      if (isMounted && books && books.length > 0) {
+        setPresetBooks(books);
+        // If current active book is default, set to the first book from Supabase
+        setActiveBook((prev) => (prev.title === PRESET_BOOKS[0].data.title ? books[0].data : prev));
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Handle outside click to close suggestions
   useEffect(() => {
@@ -61,7 +80,7 @@ export default function App() {
   useEffect(() => {
     if (searchQuery.trim().length < 2) {
       // Show preset suggestions by default when input is focused but short
-      const defaultPresets = PRESET_BOOKS.map(b => ({
+      const defaultPresets = presetBooks.map(b => ({
         title: b.data.title,
         author: b.data.author,
         genre: b.data.genre,
@@ -73,8 +92,8 @@ export default function App() {
 
     const timer = setTimeout(async () => {
       try {
-        // First filter local presets to show instantly
-        const localMatches = PRESET_BOOKS.filter(b => 
+        // First filter local/loaded presets to show instantly
+        const localMatches = presetBooks.filter(b => 
           b.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
           b.author.toLowerCase().includes(searchQuery.toLowerCase())
         ).map(b => ({
@@ -84,30 +103,34 @@ export default function App() {
           year: b.data.publicationYear
         }));
 
-        // Fetch from dynamic suggestions API
-        const response = await fetch(`/api/suggestions?query=${encodeURIComponent(searchQuery)}`);
-        if (response.ok) {
-          const apiData: SearchSuggestion[] = await response.json();
-          // Merge lists and prevent duplicates
-          const seen = new Set(localMatches.map(m => m.title.toLowerCase()));
-          const combined = [...localMatches];
-          for (const item of apiData) {
-            if (!seen.has(item.title.toLowerCase())) {
-              combined.push(item);
-              seen.add(item.title.toLowerCase());
-            }
+        // Concurrently query Supabase and backend suggestions API
+        const [supabaseMatches, apiData] = await Promise.all([
+          searchBooksInSupabase(searchQuery),
+          fetch(`/api/suggestions?query=${encodeURIComponent(searchQuery)}`)
+            .then(res => (res.ok ? (res.json() as Promise<SearchSuggestion[]>) : []))
+            .catch(() => [] as SearchSuggestion[])
+        ]);
+
+        // Merge lists and deduplicate by title
+        const seen = new Set<string>();
+        const combined: SearchSuggestion[] = [];
+
+        for (const item of [...localMatches, ...supabaseMatches, ...apiData]) {
+          const lower = item.title.toLowerCase();
+          if (!seen.has(lower)) {
+            seen.add(lower);
+            combined.push(item);
           }
-          setSuggestions(combined.slice(0, 5));
-        } else {
-          setSuggestions(localMatches.slice(0, 5));
         }
+
+        setSuggestions(combined.slice(0, 5));
       } catch (err) {
         console.error("Suggestions fetch error:", err);
       }
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [searchQuery]);
+  }, [searchQuery, presetBooks]);
 
   // Main book analysis fetcher
   const handleAnalyzeBook = async (title: string, author?: string) => {
@@ -131,10 +154,9 @@ export default function App() {
     }, 2200);
 
     try {
-      // First check if it matches an existing preset
-      const matchedPreset = PRESET_BOOKS.find(b => b.title.toLowerCase() === title.toLowerCase());
+      // 1. First check if it matches an in-memory or loaded preset
+      const matchedPreset = presetBooks.find(b => b.title.toLowerCase() === title.toLowerCase());
       if (matchedPreset) {
-        // Instant load
         setTimeout(() => {
           setActiveBook(matchedPreset.data);
           setCitations([]);
@@ -145,7 +167,20 @@ export default function App() {
         return;
       }
 
-      // Fetch from API
+      // 2. Next check if it exists in Supabase
+      const supabaseBook = await findBookByTitleOrSlug(title);
+      if (supabaseBook) {
+        setTimeout(() => {
+          setActiveBook(supabaseBook);
+          setCitations([]);
+          setLoading(false);
+          setActiveTab("overview");
+          clearInterval(interval);
+        }, 1200);
+        return;
+      }
+
+      // 3. Fall back to AI Analysis endpoint
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -199,7 +234,7 @@ export default function App() {
           <button 
             onClick={() => {
               setSearchQuery("");
-              setActiveBook(PRESET_BOOKS[0].data);
+              setActiveBook(presetBooks[0].data);
               setActiveTab("overview");
             }}
             className="flex items-center gap-2 group cursor-pointer text-left"
